@@ -1,0 +1,11 @@
+# Compiled binaries
+watchdog
+workers/worker
+
+# Object files
+*.o
+src/*.o
+
+# Log files
+*.log
+watchdog.log
