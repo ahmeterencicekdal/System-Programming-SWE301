@@ -5,7 +5,7 @@
  *  - SIGCHLD + waitpid() ile sonlanan alt surecleri toplama
  *  - Normal / beklenmeyen sonlanmayi ayirt etme
  *  - En fazla PM_MAX_RESTARTS kez otomatik yeniden baslatma
- *  - (commit 3) setitimer() + SIGALRM ile periyodik kontrol
+ *  - setitimer() + SIGALRM ile periyodik kontrol
  *
  * Not: Sinyal handler'lari signal_manager.c'dedir ve sadece bayrak set eder.
  * Bu dosyadaki fonksiyonlar ana donguden (main.c) cagrilir, handler'dan DEGIL.
@@ -97,7 +97,6 @@ static child_info_t *find_by_pid(pid_t pid)
     }
     return NULL;
 }
-
 /* Tek bir alt sureci fork + execv ile baslatir */
 static int spawn_child(child_info_t *c)
 {
@@ -195,6 +194,21 @@ static void handle_termination(child_info_t *c, pid_t old_pid, int status)
 
     try_restart(c);
 }
+/* Periyodik SIGALRM zamanlayicisini ayarlar (sec = 0 ise kapatir) */
+static int set_timer(int sec)
+{
+    struct itimerval tv;
+
+    memset(&tv, 0, sizeof(tv));
+    tv.it_value.tv_sec = sec;     /* ilk tetiklenme */
+    tv.it_interval.tv_sec = sec;  /* sonraki tekrarlar */
+
+    if (setitimer(ITIMER_REAL, &tv, NULL) == -1) {
+        pm_log("ERROR", "setitimer() basarisiz: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* Disariya acik fonksiyonlar                                          */
@@ -221,8 +235,11 @@ int pm_init(void)
     g_child_count = n;
     g_restarts_enabled = 1;
 
-    pm_log("PM_INIT", "Process manager hazir (%d alt surec, restart limiti: %d)",
-           n, PM_MAX_RESTARTS);
+    if (set_timer(PM_CHECK_INTERVAL_SEC) != 0)
+        return -1;
+
+    pm_log("PM_INIT", "Process manager hazir (%d alt surec, restart limiti: %d, kontrol araligi: %d sn)",
+           n, PM_MAX_RESTARTS, PM_CHECK_INTERVAL_SEC);
     return 0;
 }
 
@@ -264,16 +281,43 @@ void pm_handle_sigchld(void)
     if (pid == -1 && errno != ECHILD)
         pm_log("ERROR", "waitpid() basarisiz: %s", strerror(errno));
 }
-
 void pm_periodic_check(void)
 {
-    /* TODO (commit 3): setitimer + SIGALRM ile periyodik kontrol */
+    int i;
+    int active = 0;
+
+    /* Kacirilmis bir SIGCHLD varsa once onu topla */
+    pm_handle_sigchld();
+
+    for (i = 0; i < g_child_count; i++) {
+        child_info_t *c = &g_children[i];
+
+        if (c->state != CHILD_RUNNING)
+            continue;
+
+        /* kill(pid, 0): sinyal gondermez, sadece surec var mi diye bakar */
+        if (kill(c->pid, 0) == -1 && errno == ESRCH) {
+            pm_log("WARNING", "%s (PID: %d) artik yok, kayip olarak isaretlendi",
+                   c->name, (int)c->pid);
+            c->pid = -1;
+            if (g_restarts_enabled)
+                try_restart(c);
+            else
+                c->state = CHILD_STOPPED;
+            continue;
+        }
+        active++;
+    }
+
+    pm_log("PERIODIC_CHECK", "Periyodik kontrol: %d/%d alt surec calisiyor",
+           active, g_child_count);
 }
 
 void pm_stop_restarts(void)
 {
     g_restarts_enabled = 0;
-    pm_log("PM_STOP", "Otomatik restart durduruldu");
+    set_timer(0);
+    pm_log("PM_STOP", "Otomatik restart ve periyodik kontrol durduruldu");
 }
 
 void pm_send_sigterm_all(void)
@@ -326,7 +370,12 @@ int pm_active_count(void)
 
 void pm_report_all_status(void)
 {
-    /* TODO (commit 3): SIGUSR1 raporu icin her alt surecin durumunu logla */
+    int i;
+
+    for (i = 0; i < g_child_count; i++) {
+        const child_info_t *c = &g_children[i];
+        logger_log_process_status(i + 1, c->pid, pm_state_str(c->state), c->restart_count);
+    }
 }
 
 const char *pm_state_str(child_state_t state)
