@@ -2,7 +2,9 @@
  * process_manager.c - Alt surec yonetimi (Student 2)
  *
  *  - fork() + execv() ile alt surec baslatma
- *  - (commit 2) SIGCHLD + waitpid, normal/beklenmeyen ayrimi, restart
+ *  - SIGCHLD + waitpid() ile sonlanan alt surecleri toplama
+ *  - Normal / beklenmeyen sonlanmayi ayirt etme
+ *  - En fazla PM_MAX_RESTARTS kez otomatik yeniden baslatma
  *  - (commit 3) setitimer() + SIGALRM ile periyodik kontrol
  *
  * Not: Sinyal handler'lari signal_manager.c'dedir ve sadece bayrak set eder.
@@ -85,6 +87,17 @@ static void copy_str(char *dst, size_t size, const char *src)
     dst[len] = '\0';
 }
 
+static child_info_t *find_by_pid(pid_t pid)
+{
+    int i;
+
+    for (i = 0; i < g_child_count; i++) {
+        if (g_children[i].pid == pid)
+            return &g_children[i];
+    }
+    return NULL;
+}
+
 /* Tek bir alt sureci fork + execv ile baslatir */
 static int spawn_child(child_info_t *c)
 {
@@ -124,6 +137,63 @@ static int spawn_child(child_info_t *c)
     pm_log("CHILD_START", "%s baslatildi (PID: %d, mod: %s, restart: %d/%d)",
            c->name, (int)pid, c->mode, c->restart_count, PM_MAX_RESTARTS);
     return 0;
+}
+
+/* Beklenmeyen sonlanmadan sonra limit dahilinde yeniden baslatir */
+static void try_restart(child_info_t *c)
+{
+    if (c->restart_count >= PM_MAX_RESTARTS) {
+        c->state = CHILD_FAILED;
+        pm_log("RESTART_LIMIT",
+               "%s restart limitine (%d) ulasti, bir daha baslatilmayacak",
+               c->name, PM_MAX_RESTARTS);
+        return;
+    }
+
+    c->restart_count++;
+    pm_log("CHILD_RESTART", "%s yeniden baslatiliyor (deneme %d/%d)",
+           c->name, c->restart_count, PM_MAX_RESTARTS);
+
+    if (spawn_child(c) != 0)
+        c->state = CHILD_FAILED;
+}
+
+/* waitpid ile toplanan bir alt surecin nasil bittigini inceler */
+static void handle_termination(child_info_t *c, pid_t old_pid, int status)
+{
+    /* Kapanis sirasinda: restart yok, sadece kaydet */
+    if (!g_restarts_enabled) {
+        c->state = CHILD_STOPPED;
+        if (WIFSIGNALED(status))
+            pm_log("CHILD_STOPPED", "%s durduruldu (PID: %d, sinyal: %d - %s)",
+                   c->name, (int)old_pid, WTERMSIG(status), strsignal(WTERMSIG(status)));
+        else
+            pm_log("CHILD_STOPPED", "%s durduruldu (PID: %d, cikis kodu: %d)",
+                   c->name, (int)old_pid, WEXITSTATUS(status));
+        return;
+    }
+
+    /* 1) Normal sonlanma: exit(0) -> yeniden baslatilmaz */
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        c->state = CHILD_EXITED_OK;
+        pm_log("CHILD_EXIT",
+               "%s normal sonlandi (PID: %d, cikis kodu: 0), yeniden baslatilmayacak",
+               c->name, (int)old_pid);
+        return;
+    }
+
+    /* 2) Hata koduyla sonlanma: exit(!= 0) */
+    if (WIFEXITED(status)) {
+        pm_log("CHILD_CRASH", "%s hata ile sonlandi (PID: %d, cikis kodu: %d)",
+               c->name, (int)old_pid, WEXITSTATUS(status));
+    }
+    /* 3) Sinyal ile oldurulme (ornegin SIGKILL, SIGSEGV) */
+    else if (WIFSIGNALED(status)) {
+        pm_log("CHILD_CRASH", "%s sinyal ile sonlandi (PID: %d, sinyal: %d - %s)",
+               c->name, (int)old_pid, WTERMSIG(status), strsignal(WTERMSIG(status)));
+    }
+
+    try_restart(c);
 }
 
 /* ------------------------------------------------------------------ */
@@ -173,7 +243,26 @@ int pm_start_all(void)
 
 void pm_handle_sigchld(void)
 {
-    /* TODO (commit 2): waitpid ile toplama + normal/hatali ayrimi + restart */
+    int status;
+    pid_t pid;
+
+    /* Birden fazla cocuk ayni anda olebilir; SIGCHLD'ler birlesebilir.
+     * Bu yuzden WNOHANG ile toplanacak cocuk kalmayana kadar donuyoruz. */
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        child_info_t *c = find_by_pid(pid);
+
+        if (c == NULL) {
+            pm_log("WARNING", "Tabloda olmayan alt surec toplandi (PID: %d)", (int)pid);
+            continue;
+        }
+
+        c->pid = -1;
+        c->last_status = status;
+        handle_termination(c, pid, status);
+    }
+
+    if (pid == -1 && errno != ECHILD)
+        pm_log("ERROR", "waitpid() basarisiz: %s", strerror(errno));
 }
 
 void pm_periodic_check(void)
