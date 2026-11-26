@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "logger.h"
+#include "process_manager.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -76,13 +77,7 @@ void logger_report_status(void) {
     }
 
     logger_log_event("STATUS_REPORT", "=== SIGUSR1 Durum Raporu Baslangici ===");
-
-    /*
-     * TODO: Öğrenci 2 (process_manager) eklendiğinde,
-     * çalışan tüm alt süreçler için logger_log_process_status(...) burada çağrılacak.
-     * Örnek: pm_report_all_status();
-     */
-
+    pm_report_all_status();
     logger_log_event("STATUS_REPORT", "=== SIGUSR1 Durum Raporu Sonu ===");
 }
 
