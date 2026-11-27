@@ -51,6 +51,13 @@ for i in 1 2 3 4; do
 done
 
 echo ""
+echo "=== 4.5. Normal Sonlanma ve 3/3 Restart Limitini Bekleme ==="
+sleep 12
+kill -SIGUSR1 "$WD_PID"
+sleep 1
+echo "[OK] Limit ve normal sonlanma sonrasi ikinci SIGUSR1 gonderildi."
+
+echo ""
 echo "=== 5. SIGTERM ile Guvenli Kapanis Testi ==="
 kill -SIGTERM "$WD_PID" 
 wait "$WD_PID"
